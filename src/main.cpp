@@ -1,4 +1,4 @@
-#include <Arduino.h>
+#include "main.h"
 
 #define PIN_RELAIS_PUMP                                   GPIO_NUM_16
 #define PIN_RELAIS_SOLENOID                               GPIO_NUM_17
@@ -17,7 +17,7 @@ void count_liters() {
 
 
 void setup() {
-  Serial.begin(115200);
+  DualSerial.begin(115200);
   
   pinMode(PIN_SENSOR_FLOW, INPUT_PULLUP);
   attachInterrupt(PIN_SENSOR_FLOW, count_liters, FALLING);
@@ -26,13 +26,19 @@ void setup() {
   pinMode(PIN_RELAIS_SOLENOID, OUTPUT);
   pinMode(PIN_BUTTON, INPUT_PULLUP);
   
+  // initialize project utility
+  DualSerial.println("Initializing project utils");
+  project_utils_init("Neue Klospülung");
+
   }
 
 void loop() {
+  project_utils_update();
+  ui_serial_comm_handler();
 
   // ------------ Program ------------ //
   if (digitalRead(PIN_BUTTON) == LOW) {
-    Serial.println("Button pressed");
+    DualSerial.println("Button pressed");
     
 
     // setze den literzähler zurück
@@ -41,14 +47,14 @@ void loop() {
     // öffne das ventil und setze einen Zeitstempel
     digitalWrite(PIN_RELAIS_SOLENOID, HIGH);
     unsigned long time_start = millis();
-    Serial.println("Valve opened");
+    DualSerial.println("Valve opened");
 
     // warte 2 Sekunden
     delay(2000);
 
     // starte die pumpe
     digitalWrite(PIN_RELAIS_PUMP, HIGH);
-    Serial.println("Pump started");
+    DualSerial.println("Pump started");
 
     // wir warten bis 1 Liter durchgeflossen ist, aber das ventil soll maximal 10 Sekunden geöffnet bleiben
     while(literCounter < 1 && millis() < time_start + 10000)
@@ -56,14 +62,15 @@ void loop() {
 
     // schliesse das ventil
     digitalWrite(PIN_RELAIS_SOLENOID, LOW);
-    Serial.println("Valve closed");
+    DualSerial.println("Valve closed");
 
     // warte 2 Sekunden
     delay(2000);
 
     // schalte die pumpe aus
     digitalWrite(PIN_RELAIS_PUMP, LOW);
-    Serial.println("Pump stopped");
-
+    DualSerial.println("Pump stopped");
   }
+
+  delay(20);
 }
