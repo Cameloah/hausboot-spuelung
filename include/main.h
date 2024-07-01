@@ -1,5 +1,6 @@
 #include "Arduino.h"
 #include "main_project_utils.h"
+#include "network_manager.h"
 #include "user_interface.h"
 
 // ---------- DEBUG AND SYSTEM CONTROL ---------- //
@@ -28,3 +29,5 @@
 // time module settings
 #define TIMEZONE_SEC_OFFSET             3600  // CET is UTC+1
 #define DAYLIGHT_SAVING_SEC_OFFSET      3600  // Additional offset for DST (CEST is UTC+2)
+
+#define WIFI_SEARCH_INTERVAL            5000

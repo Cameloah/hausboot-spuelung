@@ -10,8 +10,9 @@
 
 // ------------ system variables ------------ //
 double literCounter = 0;
+unsigned long lastWifiCheck = 0;
 
-void count_liters() {
+void IRAM_ATTR count_liters() {
   literCounter += SENSOR_LITER_PER_PULSE;
 }
 
@@ -27,7 +28,6 @@ void setup() {
   pinMode(PIN_BUTTON, INPUT_PULLUP);
   
   // initialize project utility
-  DualSerial.println("Initializing project utils");
   project_utils_init("Neue Klospülung");
 
   }
@@ -36,9 +36,10 @@ void loop() {
   project_utils_update();
   ui_serial_comm_handler();
 
+
   // ------------ Program ------------ //
   if (digitalRead(PIN_BUTTON) == LOW) {
-    DualSerial.println("Button pressed");
+    DualSerial.println("Taste gedrückt");
     
 
     // setze den literzähler zurück
@@ -47,30 +48,43 @@ void loop() {
     // öffne das ventil und setze einen Zeitstempel
     digitalWrite(PIN_RELAIS_SOLENOID, HIGH);
     unsigned long time_start = millis();
-    DualSerial.println("Valve opened");
+    DualSerial.println("Ventil geöffnet");
 
     // warte 2 Sekunden
     delay(2000);
 
     // starte die pumpe
     digitalWrite(PIN_RELAIS_PUMP, HIGH);
-    DualSerial.println("Pump started");
+    DualSerial.println("Pumpe gestartet");
 
     // wir warten bis 1 Liter durchgeflossen ist, aber das ventil soll maximal 10 Sekunden geöffnet bleiben
-    while(literCounter < 1 && millis() < time_start + 10000)
+    while(literCounter < 1 && millis() < time_start + 10000) {
+      DualSerial.println("Liter: " + String(literCounter));
       delay(100);
+    }
 
     // schliesse das ventil
     digitalWrite(PIN_RELAIS_SOLENOID, LOW);
-    DualSerial.println("Valve closed");
+    DualSerial.println("Ventil geschlossen");
 
     // warte 2 Sekunden
     delay(2000);
 
     // schalte die pumpe aus
     digitalWrite(PIN_RELAIS_PUMP, LOW);
-    DualSerial.println("Pump stopped");
+    DualSerial.println("Pumpe gestoppt");
   }
+  // ------------ Wifi ------------ //
+  // prevent rollover problems
+  if (millis() > lastWifiCheck)
+    lastWifiCheck = millis();
+
+  // regularily check wifi connection
+  if(!network_manager_is_connected() && millis() - lastWifiCheck > WIFI_SEARCH_INTERVAL) {
+    network_manager_wifi_connect();
+    lastWifiCheck = millis();
+  }
+
 
   delay(20);
 }
