@@ -12,6 +12,7 @@
 double literCounter = 0;
 unsigned long lastWifiCheck = 0;
 
+// interrupt callback for the flow sensor
 void IRAM_ATTR count_liters() {
   literCounter += SENSOR_LITER_PER_PULSE;
 }
@@ -19,7 +20,8 @@ void IRAM_ATTR count_liters() {
 
 void setup() {
   DualSerial.begin(115200);
-  
+
+  // configure GPIOs  
   pinMode(PIN_SENSOR_FLOW, INPUT_PULLUP);
   attachInterrupt(PIN_SENSOR_FLOW, count_liters, FALLING);
 
