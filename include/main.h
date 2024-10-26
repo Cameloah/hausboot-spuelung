@@ -2,6 +2,8 @@
 #include "main_project_utils.h"
 #include "network_manager.h"
 #include "user_interface.h"
+#include "memory_module.h"
+#include "webserial_monitor.h""
 
 // ---------- DEBUG AND SYSTEM CONTROL ---------- //
 
@@ -20,10 +22,10 @@
 // AP verbosity:
 // 1 - AP will spawn if esp cannot connect to existing wifi for any reason
 // 2 - AP will always spawn, even if connected to existing wifi
-#define AP_VERBOSITY                    1
+#define AP_VERBOSITY                    2
 
 // comment this out to have an always on AP once its spawned
-// #define AP_TIMEOUT                      300000      // 5 min
+#define AP_TIMEOUT                      300000      // 5 min
 #define TIMEOUT_WIFI_CONNECT_MS         5000
 
 // time module settings
