@@ -1,7 +1,7 @@
 // define your current FW version here
 #define FW_VERSION_MAJOR                    0
 #define FW_VERSION_MINOR                    0
-#define FW_VERSION_PATCH                    1
+#define FW_VERSION_PATCH                    2
 
 // set the github user and source repo here
 #define GITHUB_REPO     "your-user/your-repository"

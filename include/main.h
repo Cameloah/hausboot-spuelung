@@ -3,7 +3,8 @@
 #include "network_manager.h"
 #include "user_interface.h"
 #include "memory_module.h"
-#include "webserial_monitor.h""
+#include "webserial_monitor.h"
+#include "SPIFFS.h"
 
 // ---------- DEBUG AND SYSTEM CONTROL ---------- //
 
