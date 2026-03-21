@@ -35,9 +35,12 @@ void control_serve(AsyncWebServerRequest *request) {
 void control_values_get(AsyncWebServerRequest *request) {
 
     String payload = String(*config.getFloat("flush-water")) + "\n"
+                    + String(*config.getFloat("flush-water-s")) + "\n"
                     + String(*config.getFloat("pre-water")) + "\n"
+                    + String(*config.getFloat("pre-water-s")) + "\n"
                     + String(*config.getFloat("pump-delay")) + "\n"
-                    + String(*config.getFloat("end-water"));
+                    + String(*config.getFloat("end-water")) + "\n"
+                    + String(*config.getFloat("end-water-s"));
     
     request->send(200, "text/plain", payload);
 }
@@ -83,17 +86,29 @@ void control_flush(AsyncWebServerRequest *request) {
 void control_values_post(AsyncWebServerRequest *request) {
     int params = request->params();
     for(int i=0;i<params;i++){
-        AsyncWebParameter* p = request->getParam(i);
+        const AsyncWebParameter* p = request->getParam(i);
         if(p->isPost()){
             if (p->name() == "flushWater") {
                 config.set("flush-water", p->value().toFloat(), true);
                 DualSerial.print("Spülwassermenge gesetzt auf [L]: ");
                 DualSerial.println(p->value());
             }
+
+            if (p->name() == "flushWaterTimeout") {
+                config.set("flush-water-s", p->value().toFloat(), true);
+                DualSerial.print("Spülwasser Timeout gesetzt auf [s]: ");
+                DualSerial.println(p->value());
+            }
             
             if (p->name() == "preWater") {
                 config.set("pre-water", p->value().toFloat(), true);
                 DualSerial.print("Vorspülwassermenge gesetzt auf [L]: ");
+                DualSerial.println(p->value());
+            }
+
+            if (p->name() == "preWaterTimeout") {
+                config.set("pre-water-s", p->value().toFloat(), true);
+                DualSerial.print("Vorspülwasser Timeout gesetzt auf [s]: ");
                 DualSerial.println(p->value());
             }
 
@@ -106,6 +121,12 @@ void control_values_post(AsyncWebServerRequest *request) {
             if (p->name() == "endWater") {
                 config.set("end-water", p->value().toFloat(), true);
                 DualSerial.print("Nachspülwassermenge gesetzt auf [L]: ");
+                DualSerial.println(p->value());
+            }
+
+            if (p->name() == "endWaterTimeout") {
+                config.set("end-water-s", p->value().toFloat(), true);
+                DualSerial.print("Nachspülwasser Timeout gesetzt auf [s]: ");
                 DualSerial.println(p->value());
             }
         }
@@ -132,10 +153,12 @@ void setup() {
 
   // setup memory
   config.addParameter("flush-water", (float) 1.5);
+  config.addParameter("flush-water-s", (float) 10);
   config.addParameter("pre-water", (float) 0.5);
+  config.addParameter("pre-water-s", (float) 10);
   config.addParameter("pump-delay", (float) 2);
   config.addParameter("end-water", (float) 1.0);
-
+  config.addParameter("end-water-s", (float) 10);
   config.loadAllStrict();
 
   // setup control page
@@ -174,10 +197,12 @@ void loop() {
     
     // ziehe Werte aus dem Speicher
     float flush_water = *config.getFloat("flush-water");
+    float flush_water_timeout = *config.getFloat("flush-water-s");
     float pre_water = *config.getFloat("pre-water");
+    float pre_water_timeout = *config.getFloat("pre-water-s");
     float pump_delay = *config.getFloat("pump-delay");
     float end_water = *config.getFloat("end-water");
-
+    float end_water_timeout = *config.getFloat("end-water-s");
     // setze den literzähler zurück
     literCounter = 0;
 
@@ -187,7 +212,7 @@ void loop() {
     DualSerial.println("Ventil geöffnet");
 
     // wir warten bis vorlaufmenge durchgeflossen ist
-    while(literCounter < pre_water && millis() < time_start + 10000) {
+    while(literCounter < pre_water && millis() < time_start + pre_water_timeout * 1000) {
       delay(20);
     }
     DualSerial.println("Zeit: " + String((millis() - time_start) / 1000.0) + " Sekunden");
@@ -195,10 +220,11 @@ void loop() {
 
     // starte die pumpe
     digitalWrite(PIN_RELAIS_PUMP, HIGH);
+    time_start = millis();
     DualSerial.println("Pumpe gestartet");
 
-    // wir warten bis die Spühlwassermenge durchgeflossen ist, aber das ventil soll maximal 10 Sekunden geöffnet bleiben
-    while(literCounter < flush_water && millis() < time_start + 20000) {
+    // wir warten bis die Spühlwassermenge durchgeflossen ist, aber das ventil soll maximal definierte Zeit geöffnet bleiben
+    while(literCounter < flush_water && millis() < time_start + flush_water_timeout * 1000) {
       delay(20);
     }
     DualSerial.println("Zeit: " + String((millis() - time_start) / 1000.0) + " Sekunden");
@@ -222,7 +248,7 @@ void loop() {
     DualSerial.println("Ventil geöffnet");
 
     // wir warten bis 1 Liter durchgeflossen ist, aber das ventil soll maximal 10 Sekunden geöffnet bleiben
-    while(literCounter < end_water && millis() < time_start + 10000) {
+    while(literCounter < end_water && millis() < time_start + end_water_timeout * 1000) {
       delay(100);
     }
     DualSerial.println("Zeit: " + String((millis() - time_start) / 1000.0) + " Sekunden");

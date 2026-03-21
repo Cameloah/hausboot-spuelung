@@ -45,12 +45,36 @@
 
           <div class="twocolumns">
             <div>
+              <label for="flushWaterTimeout">Spülwasser Timeout</label>
+            </div>
+            <div class="setting_box">
+              <div style="display: flex; align-items: center;">
+                <input type="number" id="flushWaterTimeout" name="flushWaterTimeout" step="0.1" min="0" placeholder="Timeout in Sekunden" style="width: 50px;">
+                <span style="margin-left: 5px;">s</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="twocolumns">
+            <div>
               <label for="preWater">Wasservorlaufmenge</label>
             </div>
             <div class="setting_box">
               <div style="display: flex; align-items: center;">
                 <input type="number" id="preWater" name="preWater" step="0.1" min="0" placeholder="Menge in Liter" style="width: 50px;">
                 <span style="margin-left: 5px;">L</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="twocolumns">
+            <div>
+              <label for="preWaterTimeout">Wasservorlauf Timeout</label>
+            </div>
+            <div class="setting_box">
+              <div style="display: flex; align-items: center;">
+                <input type="number" id="preWaterTimeout" name="preWaterTimeout" step="0.1" min="0" placeholder="Timeout in Sekunden" style="width: 50px;">
+                <span style="margin-left: 5px;">s</span>
               </div>
             </div>
           </div>
@@ -75,6 +99,18 @@
               <div style="display: flex; align-items: center;">
                 <input type="number" id="endWater" name="endWater" step="0.1" min="0" placeholder="Menge in Liter" style="width: 50px;">
                 <span style="margin-left: 5px;">L</span>
+              </div>
+            </div>
+          </div>
+          
+          <div class="twocolumns">
+            <div>
+              <label for="endWater">Nachlaufwassermenge Timeout</label>
+            </div>
+            <div class="setting_box">
+              <div style="display: flex; align-items: center;">
+                <input type="number" id="endWaterTimeout" name="endWaterTimeout" step="0.1" min="0" placeholder="Timeout in Sekunden" style="width: 50px;">
+                <span style="margin-left: 5px;">s</span>
               </div>
             </div>
           </div>
@@ -128,9 +164,12 @@
       .then(responseBody => {
         const values = responseBody.split("\n");
         document.getElementById("flushWater").value = values[0];
-        document.getElementById("preWater").value = values[1];
-        document.getElementById("pumpDelay").value = values[2];
-        document.getElementById("endWater").value = values[3];
+        document.getElementById("flushWaterTimeout").value = values[1];
+        document.getElementById("preWater").value = values[2];
+        document.getElementById("preWaterTimeout").value = values[3];
+        document.getElementById("pumpDelay").value = values[4];
+        document.getElementById("endWater").value = values[5];
+        document.getElementById("endWaterTimeout").value = values[6];
       });
   }
 
