@@ -1,277 +1,302 @@
 #include "main.h"
 
-#define PIN_RELAIS_PUMP                                   GPIO_NUM_17
-#define PIN_RELAIS_SOLENOID                               GPIO_NUM_16
-#define PIN_BUTTON                                        GPIO_NUM_19
-#define PIN_SENSOR_FLOW                                   GPIO_NUM_14
+#include <atomic>
 
-#define SENSOR_LITER_PER_PULSE                               0.0033333
-#define WATER_FLOW_FACTOR                                    0.75
+#include "version.h"
+
+#define PIN_RELAIS_PUMP GPIO_NUM_17
+#define PIN_RELAIS_SOLENOID GPIO_NUM_16
+#define PIN_BUTTON GPIO_NUM_19
+#define PIN_SENSOR_FLOW GPIO_NUM_14
+
+#define SENSOR_LITER_PER_PULSE 0.0033333
 
 // ------------ system variables ------------ //
-double literCounter = 0;
-unsigned long lastWifiCheck = 0;
 
-// interrupt callback for the flow sensor
-void IRAM_ATTR count_liters() {
-  literCounter += SENSOR_LITER_PER_PULSE;
+// pulses of the flow sensor, counted in the interrupt
+static std::atomic<uint32_t> flowPulses(0);
+
+static void IRAM_ATTR count_pulse() {
+    flowPulses.fetch_add(1, std::memory_order_relaxed);
+}
+
+static double liters() {
+    return flowPulses.load() * SENSOR_LITER_PER_PULSE;
+}
+
+static Stream& console() {
+    return ProjectUtils.console();
 }
 
 // ----------------- memory ----------------- //
-MemoryModule config("nvs");
 
+// Same area and keys as the firmware before 1.2, so stored values carry over.
+static pu::Settings config;
+
+// ----------------- outputs ----------------- //
+
+static bool valveOpen = false;
+static bool pumpOn = false;
+
+static void setValve(bool open) {
+    digitalWrite(PIN_RELAIS_SOLENOID, open ? HIGH : LOW);
+    valveOpen = open;
+}
+
+static void setPump(bool on) {
+    digitalWrite(PIN_RELAIS_PUMP, on ? HIGH : LOW);
+    pumpOn = on;
+}
 
 // ----------------- control ----------------- //
-bool flag_flush = false;
-bool flag_manual_water = false;
-bool flag_manual_pump = false;
-unsigned long time_manual_water = 0;
-unsigned long time_manual_pump = 0;
 
-void control_serve(AsyncWebServerRequest *request) {
-    request->send(SPIFFS, "/control.html", "text/html");
-}
+// The flush program runs step by step from loop(), so the web page and the network keep
+// working while it runs and the emergency stop can end it.
+enum class Phase : uint8_t { Idle, PreWater, FlushWater, PumpDelay, EndWater };
 
-void control_values_get(AsyncWebServerRequest *request) {
+static Phase phase = Phase::Idle;
+static unsigned long phaseStart = 0;
 
-    String payload = String(*config.getFloat("flush-water")) + "\n"
-                    + String(*config.getFloat("flush-water-s")) + "\n"
-                    + String(*config.getFloat("pre-water")) + "\n"
-                    + String(*config.getFloat("pre-water-s")) + "\n"
-                    + String(*config.getFloat("pump-delay")) + "\n"
-                    + String(*config.getFloat("end-water")) + "\n"
-                    + String(*config.getFloat("end-water-s"));
-    
-    request->send(200, "text/plain", payload);
-}
+// values taken from memory when the program starts
+static struct {
+    float flushWater, flushWaterTimeout;
+    float preWater, preWaterTimeout;
+    float pumpDelay;
+    float endWater, endWaterTimeout;
+} program;
 
-void control_manual_water(AsyncWebServerRequest *request) {
-    time_manual_water = millis();
-    if (!flag_manual_water && !flag_flush) {
-      digitalWrite(PIN_RELAIS_SOLENOID, HIGH);
-      flag_manual_water = true;
-      DualSerial.println("Wasser go");
+static bool manualWater = false;
+static bool manualPump = false;
+
+static const char* phaseName() {
+    switch (phase) {
+    case Phase::PreWater:
+        return "Vorlauf";
+    case Phase::FlushWater:
+        return "Spülen";
+    case Phase::PumpDelay:
+        return "Pumpen-Nachlauf";
+    case Phase::EndWater:
+        return "Nachlauf";
+    case Phase::Idle:
+        break;
     }
-    request->send(200, "application/json", "{\"status\":\"water go\"}");
-}
-
-void control_manual_pump(AsyncWebServerRequest *request) {
-    time_manual_pump = millis();
-    if (!flag_manual_pump && !flag_flush) {
-      digitalWrite(PIN_RELAIS_PUMP, HIGH);
-      flag_manual_pump = true;
-      DualSerial.println("Pumpe go");
+    if (manualWater || manualPump) {
+        return "Manuell";
     }
-    request->send(200, "application/json", "{\"status\":\"pump go\"}");
+    return "Bereit";
 }
 
-void control_manual_off(AsyncWebServerRequest *request) {
-    if (!flag_flush) {
-      flag_manual_water = false;
-      flag_manual_pump = false;
-      digitalWrite(PIN_RELAIS_SOLENOID, LOW);
-      digitalWrite(PIN_RELAIS_PUMP, LOW);
-      DualSerial.println("Stopp");
+static float secondsInPhase() {
+    return (millis() - phaseStart) / 1000.0F;
+}
+
+static void enterPhase(Phase next) {
+    phase = next;
+    phaseStart = millis();
+}
+
+static void reportPhase() {
+    console().println("Zeit: " + String(secondsInPhase()) + " Sekunden");
+    console().println("Liter: " + String(liters()));
+}
+
+static void flush_start() {
+    if (phase != Phase::Idle) {
+        return;
     }
-    request->send(200, "application/json", "{\"status\":\"stop\"}");
+    // manual control ends when the program starts
+    manualWater = false;
+    manualPump = false;
+    setPump(false);
+
+    // ziehe Werte aus dem Speicher
+    program.flushWater = config.getFloat("flush-water");
+    program.flushWaterTimeout = config.getFloat("flush-water-s");
+    program.preWater = config.getFloat("pre-water");
+    program.preWaterTimeout = config.getFloat("pre-water-s");
+    program.pumpDelay = config.getFloat("pump-delay");
+    program.endWater = config.getFloat("end-water");
+    program.endWaterTimeout = config.getFloat("end-water-s");
+
+    // setze den Literzähler zurück, öffne das Ventil
+    flowPulses = 0;
+    setValve(true);
+    enterPhase(Phase::PreWater);
+    console().println("Ventil geöffnet");
 }
 
-void control_flush(AsyncWebServerRequest *request) {
-  if(flag_flush == false)
-    flag_flush = true;
+static void flush_update() {
+    switch (phase) {
+    case Phase::Idle:
+        return;
 
-  request->send(200, "OK");
-}
-
-void control_values_post(AsyncWebServerRequest *request) {
-    int params = request->params();
-    for(int i=0;i<params;i++){
-        const AsyncWebParameter* p = request->getParam(i);
-        if(p->isPost()){
-            if (p->name() == "flushWater") {
-                config.set("flush-water", p->value().toFloat(), true);
-                DualSerial.print("Spülwassermenge gesetzt auf [L]: ");
-                DualSerial.println(p->value());
-            }
-
-            if (p->name() == "flushWaterTimeout") {
-                config.set("flush-water-s", p->value().toFloat(), true);
-                DualSerial.print("Spülwasser Timeout gesetzt auf [s]: ");
-                DualSerial.println(p->value());
-            }
-            
-            if (p->name() == "preWater") {
-                config.set("pre-water", p->value().toFloat(), true);
-                DualSerial.print("Vorspülwassermenge gesetzt auf [L]: ");
-                DualSerial.println(p->value());
-            }
-
-            if (p->name() == "preWaterTimeout") {
-                config.set("pre-water-s", p->value().toFloat(), true);
-                DualSerial.print("Vorspülwasser Timeout gesetzt auf [s]: ");
-                DualSerial.println(p->value());
-            }
-
-            if (p->name() == "pumpDelay") {
-                config.set("pump-delay", p->value().toFloat(), true);
-                DualSerial.print("Pumpen-Verzögerung gesetzt auf [s]: ");
-                DualSerial.println(p->value());
-            }
-    
-            if (p->name() == "endWater") {
-                config.set("end-water", p->value().toFloat(), true);
-                DualSerial.print("Nachspülwassermenge gesetzt auf [L]: ");
-                DualSerial.println(p->value());
-            }
-
-            if (p->name() == "endWaterTimeout") {
-                config.set("end-water-s", p->value().toFloat(), true);
-                DualSerial.print("Nachspülwasser Timeout gesetzt auf [s]: ");
-                DualSerial.println(p->value());
-            }
+    case Phase::PreWater:
+        // wir warten bis die Vorlaufmenge durchgeflossen ist
+        if (liters() < program.preWater && secondsInPhase() < program.preWaterTimeout) {
+            return;
         }
-    }
+        reportPhase();
+        setPump(true);
+        enterPhase(Phase::FlushWater);
+        console().println("Pumpe gestartet");
+        return;
 
-    config.saveAll();
-    control_serve(request);
+    case Phase::FlushWater:
+        // wir warten bis die Spülwassermenge durchgeflossen ist, aber das Ventil soll maximal
+        // die definierte Zeit geöffnet bleiben (der Zähler läuft seit dem Vorlauf weiter)
+        if (liters() < program.flushWater && secondsInPhase() < program.flushWaterTimeout) {
+            return;
+        }
+        reportPhase();
+        setValve(false);
+        enterPhase(Phase::PumpDelay);
+        console().println("Ventil geschlossen");
+        return;
+
+    case Phase::PumpDelay:
+        if (secondsInPhase() < program.pumpDelay) {
+            return;
+        }
+        setPump(false);
+        console().println("Pumpe gestoppt");
+        flowPulses = 0;
+        setValve(true);
+        enterPhase(Phase::EndWater);
+        console().println("Ventil geöffnet");
+        return;
+
+    case Phase::EndWater:
+        if (liters() < program.endWater && secondsInPhase() < program.endWaterTimeout) {
+            return;
+        }
+        reportPhase();
+        setValve(false);
+        enterPhase(Phase::Idle);
+        console().println("Ventil geschlossen");
+        return;
+    }
 }
 
+static void emergency_stop() {
+    setValve(false);
+    setPump(false);
+    manualWater = false;
+    manualPump = false;
+    if (phase != Phase::Idle) {
+        ProjectUtils.log().info("Spülung abgebrochen");
+    }
+    enterPhase(Phase::Idle);
+    console().println("Stopp");
+}
+
+// Manual control while the button on the page is held. Ends by itself when the browser stops
+// responding for a second.
+static void manual_water(bool pressed) {
+    if (pressed && phase == Phase::Idle && !manualWater) {
+        setValve(true);
+        manualWater = true;
+        console().println("Wasser go");
+    } else if (!pressed && manualWater) {
+        setValve(false);
+        manualWater = false;
+        console().println("Wasser stopp");
+    }
+}
+
+static void manual_pump(bool pressed) {
+    if (pressed && phase == Phase::Idle && !manualPump) {
+        setPump(true);
+        manualPump = true;
+        console().println("Pumpe go");
+    } else if (!pressed && manualPump) {
+        setPump(false);
+        manualPump = false;
+        console().println("Pumpe stopp");
+    }
+}
+
+static void setting(pu::Page& page, const char* key, const char* label, const char* unit) {
+    page.number(config, key, label).unit(unit).min(0).step(0.1);
+}
+
+static void build_home_page() {
+    pu::Page& home = ProjectUtils.web().home("Klospülung");
+
+    home.section("Einstellungen");
+    setting(home, "flush-water", "Spülwassermenge", "L");
+    setting(home, "flush-water-s", "Spülwasser Timeout", "s");
+    setting(home, "pre-water", "Wasservorlaufmenge", "L");
+    setting(home, "pre-water-s", "Wasservorlauf Timeout", "s");
+    setting(home, "pump-delay", "Pumpen-Nachlaufzeit", "s");
+    setting(home, "end-water", "Nachlaufwassermenge", "L");
+    setting(home, "end-water-s", "Nachlaufwassermenge Timeout", "s");
+
+    home.section("Steuerung");
+    home.holdButton("Wasser", manual_water);
+    home.holdButton("Pumpe", manual_pump);
+    home.button("Spülen", flush_start);
+    home.button("Not-Stop", emergency_stop).color(pu::Color::Red);
+
+    home.section("Status");
+    home.value("Ablauf", []() { return String(phaseName()); });
+    home.value("Wassermenge", liters).unit("L");
+    home.indicator("Ventil offen", []() { return valveOpen; });
+    home.indicator("Pumpe an", []() { return pumpOn; });
+}
+
+// ----------------- main ----------------- //
 
 void setup() {
-  DualSerial.begin(115200);
+    Serial.begin(115200);
 
-  // configure GPIOs  
-  pinMode(PIN_SENSOR_FLOW, INPUT_PULLUP);
-  attachInterrupt(PIN_SENSOR_FLOW, count_liters, FALLING);
+    // configure GPIOs
+    pinMode(PIN_RELAIS_PUMP, OUTPUT);
+    pinMode(PIN_RELAIS_SOLENOID, OUTPUT);
+    setValve(false);
+    setPump(false);
+    pinMode(PIN_BUTTON, INPUT_PULLUP);
+    pinMode(PIN_SENSOR_FLOW, INPUT_PULLUP);
+    attachInterrupt(PIN_SENSOR_FLOW, count_pulse, FALLING);
 
-  pinMode(PIN_RELAIS_PUMP, OUTPUT);
-  pinMode(PIN_RELAIS_SOLENOID, OUTPUT);
-  pinMode(PIN_BUTTON, INPUT_PULLUP);
-  
-  // initialize project utility
-  project_utils_init("Neue Klospülung");
+    // initialize project utility
+    static pu::Config utils;
+    utils.deviceName = "Neue Klospülung";
+    utils.firmwareVersion = pu::Semver{FW_VERSION_MAJOR, FW_VERSION_MINOR, FW_VERSION_PATCH};
+    utils.wifiConnectTimeoutMs = 5000;
+    utils.apMode = pu::ApMode::Always;
+    utils.apTimeoutMs = 300000; // 5 min
+    utils.githubRepo = GITHUB_REPO;
+    utils.githubFirmwareAsset = GITHUB_FW_BIN;
+    ProjectUtils.begin(utils);
 
-  // setup memory
-  config.addParameter("flush-water", (float) 1.5);
-  config.addParameter("flush-water-s", (float) 10);
-  config.addParameter("pre-water", (float) 0.5);
-  config.addParameter("pre-water-s", (float) 10);
-  config.addParameter("pump-delay", (float) 2);
-  config.addParameter("end-water", (float) 1.0);
-  config.addParameter("end-water-s", (float) 10);
-  config.loadAllStrict();
+    // setup memory
+    config.begin("nvs", &ProjectUtils.log());
+    config.define("flush-water", 1.5F);
+    config.define("flush-water-s", 10.0F);
+    config.define("pre-water", 0.5F);
+    config.define("pre-water-s", 10.0F);
+    config.define("pump-delay", 2.0F);
+    config.define("end-water", 1.0F);
+    config.define("end-water-s", 10.0F);
+    config.loadAll();
 
-  // setup control page
-  server.on("/control", HTTP_POST, control_values_post);
-  server.on("/control/pull", HTTP_GET, control_values_get); 
-  server.on("/control/water", HTTP_GET, control_manual_water);
-  server.on("/control/pump", HTTP_GET, control_manual_pump);
-  server.on("/control/off", HTTP_GET, control_manual_off);
-  server.on("/control/flush", HTTP_GET, control_flush);
-  server.on("/control", HTTP_GET, control_serve); 
+    build_home_page();
 
-  }
+    // the control page used to be at /control
+    ProjectUtils.server().on("/control", HTTP_GET,
+                             [](AsyncWebServerRequest* request) { request->redirect("/"); });
+}
 
 void loop() {
-  project_utils_update();
-  ui_serial_comm_handler();
+    ProjectUtils.loop();
+    ui_serial_comm_handler();
 
-  // ------------ Manual ------------ //
-  if (flag_manual_water && millis() - time_manual_water > 1000) {
-    digitalWrite(PIN_RELAIS_SOLENOID, LOW);
-    flag_manual_water = false;
-    DualSerial.println("Ventil Timout");
-  }
-
-  if (flag_manual_pump && millis() - time_manual_pump > 1000) {
-    digitalWrite(PIN_RELAIS_PUMP, LOW);
-    flag_manual_pump = false;
-    DualSerial.println("Pumpe Timeout");
-  }
-
-
-  // ------------ Program ------------ //
-  if (digitalRead(PIN_BUTTON) == LOW || flag_flush) {
-    flag_flush = true;
-    DualSerial.println("Taste gedrückt");
-    
-    // ziehe Werte aus dem Speicher
-    float flush_water = *config.getFloat("flush-water");
-    float flush_water_timeout = *config.getFloat("flush-water-s");
-    float pre_water = *config.getFloat("pre-water");
-    float pre_water_timeout = *config.getFloat("pre-water-s");
-    float pump_delay = *config.getFloat("pump-delay");
-    float end_water = *config.getFloat("end-water");
-    float end_water_timeout = *config.getFloat("end-water-s");
-    // setze den literzähler zurück
-    literCounter = 0;
-
-    // öffne das ventil und setze einen Zeitstempel
-    digitalWrite(PIN_RELAIS_SOLENOID, HIGH);
-    unsigned long time_start = millis();
-    DualSerial.println("Ventil geöffnet");
-
-    // wir warten bis vorlaufmenge durchgeflossen ist
-    while(literCounter < pre_water && millis() < time_start + pre_water_timeout * 1000) {
-      delay(20);
+    if (digitalRead(PIN_BUTTON) == LOW && phase == Phase::Idle) {
+        console().println("Taste gedrückt");
+        flush_start();
     }
-    DualSerial.println("Zeit: " + String((millis() - time_start) / 1000.0) + " Sekunden");
-    DualSerial.println("Liter: " + String(literCounter));
+    flush_update();
 
-    // starte die pumpe
-    digitalWrite(PIN_RELAIS_PUMP, HIGH);
-    time_start = millis();
-    DualSerial.println("Pumpe gestartet");
-
-    // wir warten bis die Spühlwassermenge durchgeflossen ist, aber das ventil soll maximal definierte Zeit geöffnet bleiben
-    while(literCounter < flush_water && millis() < time_start + flush_water_timeout * 1000) {
-      delay(20);
-    }
-    DualSerial.println("Zeit: " + String((millis() - time_start) / 1000.0) + " Sekunden");
-    DualSerial.println("Liter: " + String(literCounter));
-
-    // schliesse das ventil
-    digitalWrite(PIN_RELAIS_SOLENOID, LOW);
-    DualSerial.println("Ventil geschlossen");
-
-    // warte die Pumpenverzögerung ab
-    delay(pump_delay * 1000);
-
-    // schalte die pumpe aus
-    digitalWrite(PIN_RELAIS_PUMP, LOW);
-    DualSerial.println("Pumpe gestoppt");
-
-    // öffne das ventil und setze einen Zeitstempel
-    literCounter = 0;
-    digitalWrite(PIN_RELAIS_SOLENOID, HIGH);
-    time_start = millis();
-    DualSerial.println("Ventil geöffnet");
-
-    // wir warten bis 1 Liter durchgeflossen ist, aber das ventil soll maximal 10 Sekunden geöffnet bleiben
-    while(literCounter < end_water && millis() < time_start + end_water_timeout * 1000) {
-      delay(100);
-    }
-    DualSerial.println("Zeit: " + String((millis() - time_start) / 1000.0) + " Sekunden");
-    DualSerial.println("Liter: " + String(literCounter));
-
-    // schliesse das ventil
-    digitalWrite(PIN_RELAIS_SOLENOID, LOW);
-    DualSerial.println("Ventil geschlossen");
-
-    flag_flush = false;
-  }
-
-  // ------------ Wifi ------------ //
-  // prevent rollover problems
-  if (millis() > lastWifiCheck)
-    lastWifiCheck = millis();
-
-  // regularily check wifi connection
-  if(!network_manager_is_connected() && millis() - lastWifiCheck > WIFI_SEARCH_INTERVAL) {
-    network_manager_wifi_connect();
-    lastWifiCheck = millis();
-  }
-
-
-  delay(20);
+    delay(20);
 }

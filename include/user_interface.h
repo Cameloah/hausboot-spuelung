@@ -9,5 +9,6 @@
 /// \brief writes out info such as firmware version
 String ui_info();
 
-/// \brief checks for user input via serial comm and offers commands for accessing internal features
+/// \brief checks for user input via USB serial or the web console and offers commands for
+/// accessing internal features
 void ui_serial_comm_handler();
